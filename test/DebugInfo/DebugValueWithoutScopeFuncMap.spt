@@ -1,0 +1,108 @@
+; A DebugValue without an active DebugScope must still be given a
+; verifier-correct DILocation recovered from the variable itself. To do that,
+; reverse translation needs the DISubprogram of the function currently being
+; emitted (SPIRVToLLVMDbgTran::transDebugIntrinsic only recovers a location
+; when the variable is scoped to that subprogram). While a function body is
+; being translated its "dbg" metadata attachment is not set yet, so it cannot
+; use Function::getSubprogram() and must fall back to FuncMap.
+;
+; This test exercises exactly that FuncMap fallback for the OpenCL.DebugInfo.100
+; flavor: unlike NonSemantic.Shader.DebugInfo.*, a DebugFunction here carries
+; the SPIR-V function id and eagerly drives body translation
+; (transDebugFunction -> transFunctionBody -> SPIRVReader::transFunction),
+; recursing into transDebugIntrinsic before the "dbg" attachment exists. foo
+; calls bar so the bodies are translated through that recursive path. Two
+; functions are used so the fallback must key FuncMap by the enclosing SPIR-V
+; function id and resolve each scope-less DebugValue to the correct subprogram:
+;  - "x" is scoped to bar and must be recovered against bar's subprogram.
+;  - "c" is scoped to foo and must be recovered against foo's subprogram.
+; A wrong lookup would either drop the record or trip the verifier's
+; conflicting-argument check (x is arg 1 of bar).
+;
+; Both functions are plain spir_func (exported, no OpEntryPoint) so each
+; DebugFunction maps one-to-one onto the emitted define; there is no kernel
+; entry-point wrapper that could be merged into the debug-bearing function and
+; blur which define the recovered records land in.
+
+; RUN: llvm-spirv -to-binary %s -o %t.spv
+; RUN: llvm-spirv -r %t.spv -o %t.rev.bc
+; RUN: llvm-dis %t.rev.bc -o %t.rev.ll
+; RUN: FileCheck < %t.rev.ll %s -check-prefix=CHECK-LLVM
+
+; RUN: opt -passes=verify -disable-output %t.rev.bc 2>&1 \
+; RUN:  | FileCheck %s --allow-empty --check-prefix=CHECK-VERIFY
+
+; CHECK-LLVM: define spir_func i32 @bar(i32 %{{[0-9a-z]+}}){{.*}} !dbg ![[#BAR:]]
+; CHECK-LLVM: #dbg_value(i32 %{{[0-9a-z]+}}, ![[#VARX:]], !DIExpression(), ![[#LOCX:]])
+; CHECK-LLVM: define spir_func i32 @foo(i32 %{{[0-9a-z]+}}){{.*}} !dbg ![[#FOO:]]
+; CHECK-LLVM: #dbg_value(i32 %{{[0-9a-z]+}}, ![[#VARC:]], !DIExpression(), ![[#LOCC:]])
+
+; CHECK-LLVM-DAG: ![[#BAR]] = distinct !DISubprogram(name: "bar"
+; CHECK-LLVM-DAG: ![[#FOO]] = distinct !DISubprogram(name: "foo"
+; CHECK-LLVM-DAG: ![[#VARX]] = !DILocalVariable(name: "x", arg: 1, scope: ![[#BAR]]
+; CHECK-LLVM-DAG: ![[#VARC]] = !DILocalVariable(name: "c", scope: ![[#FOO]]
+; CHECK-LLVM-DAG: ![[#LOCX]] = !DILocation(line: 1, scope: ![[#BAR]])
+; CHECK-LLVM-DAG: ![[#LOCC]] = !DILocation(line: 11, scope: ![[#FOO]])
+
+; CHECK-VERIFY-NOT: invalid debug info
+; CHECK-VERIFY-NOT: conflicting debug info
+; CHECK-VERIFY-NOT: attachment points at wrong subprogram
+
+119734787 65792 393230 38 0
+2 Capability Addresses
+2 Capability Linkage
+2 Capability Kernel
+5 ExtInstImport 1 "OpenCL.std"
+8 ExtInstImport 2 "OpenCL.DebugInfo.100"
+3 MemoryModel 2 2
+5 String 18 "/tmp/mini.c"
+3 String 21 "int"
+3 String 25 "bar"
+3 String 26 ""
+3 String 28 "x"
+3 String 30 "foo"
+3 String 32 "c"
+3 Source 0 0
+
+5 Decorate 5 LinkageAttributes "bar" Export
+5 Decorate 13 LinkageAttributes "foo" Export
+4 TypeInt 3 32 0
+4 Constant 3 11 2
+4 Constant 3 22 32
+4 TypeFunction 4 3 3
+2 TypeVoid 8
+
+
+5 ExtInst 8 9 2 DebugInfoNone
+6 ExtInst 8 19 2 DebugSource 18
+9 ExtInst 8 20 2 DebugCompilationUnit 65536 0 19 3
+8 ExtInst 8 23 2 DebugTypeBasic 21 22 4
+8 ExtInst 8 24 2 DebugTypeFunction 0 23 23
+15 ExtInst 8 27 2 DebugFunction 25 24 19 1 0 20 26 136 1 5
+13 ExtInst 8 29 2 DebugLocalVariable 28 23 19 1 0 27 0 1
+15 ExtInst 8 31 2 DebugFunction 30 24 19 10 0 20 26 136 10 13
+12 ExtInst 8 33 2 DebugLocalVariable 32 23 19 11 0 31 0
+5 ExtInst 8 34 2 DebugExpression
+
+5 Function 3 5 0 4
+3 FunctionParameter 3 6
+
+2 Label 7
+8 ExtInst 8 10 2 DebugValue 29 6 34
+5 IAdd 3 12 6 11
+2 ReturnValue 12
+
+1 FunctionEnd
+
+5 Function 3 13 0 4
+3 FunctionParameter 3 14
+
+2 Label 15
+6 ExtInst 8 36 2 DebugScope 31
+4 Line 18 10 0
+5 FunctionCall 3 16 5 14
+5 ExtInst 8 37 2 DebugNoScope
+8 ExtInst 8 17 2 DebugValue 33 16 34
+2 ReturnValue 16
+
+1 FunctionEnd

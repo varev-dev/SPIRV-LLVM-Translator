@@ -1654,6 +1654,31 @@ SPIRVToLLVMDbgTran::transDebugIntrinsic(const SPIRVExtInst *DebugInst,
                                   /*Column=*/0, LV->getScope());
     return std::make_pair(LV, DL);
   };
+  auto GetEnclosingSP = [&]() -> DISubprogram * {
+    // The "dbg" metadata attachment is set only after the function body is
+    // translated, so while processing the body fall back to FuncMap, which
+    // is populated before body translation starts.
+    if (DISubprogram *SP = BB->getParent()->getSubprogram())
+      return SP;
+    const SPIRVBasicBlock *SPBB = DebugInst->getBasicBlock();
+    if (!SPBB)
+      return nullptr;
+    auto It = FuncMap.find(SPBB->getParent()->getId());
+    return It != FuncMap.end() ? It->second : nullptr;
+  };
+  auto GetRecordLoc =
+      [&](const std::pair<DILocalVariable *, DebugLoc> &LocalVar) -> DebugLoc {
+    if (DebugLoc Loc = transDebugScope(DebugInst))
+      return Loc;
+    // Recover the location from the variable itself. A variable from another
+    // subprogram would need an inlinedAt that only the missing DebugScope could
+    // provide, so drop such records (empty DebugLoc).
+    // When enclosing subprogram is unknown keep the fallback.
+    DISubprogram *FnSP = GetEnclosingSP();
+    if (FnSP && LocalVar.first->getScope()->getSubprogram() != FnSP)
+      return DebugLoc();
+    return LocalVar.second;
+  };
   auto GetValue = [&](SPIRVId Id) -> Value * {
     auto *V = BM->get<SPIRVValue>(Id);
     return SPIRVReader->transValue(V, BB->getParent(), BB);
@@ -1670,9 +1695,9 @@ SPIRVToLLVMDbgTran::transDebugIntrinsic(const SPIRVExtInst *DebugInst,
   case SPIRVDebug::Declare: {
     using namespace SPIRVDebug::Operand::DebugDeclare;
     auto LocalVar = GetLocalVar(Ops[DebugLocalVarIdx]);
-    DebugLoc Loc = transDebugScope(DebugInst);
+    DebugLoc Loc = GetRecordLoc(LocalVar);
     if (!Loc)
-      Loc = LocalVar.second;
+      return nullptr;
     DIBuilder &DIB = getDIBuilder(DebugInst);
     if (getDbgInst<SPIRVDebug::DebugInfoNone>(Ops[VariableIdx])) {
       auto *Null =
@@ -1688,9 +1713,11 @@ SPIRVToLLVMDbgTran::transDebugIntrinsic(const SPIRVExtInst *DebugInst,
   case SPIRVDebug::Value: {
     using namespace SPIRVDebug::Operand::DebugValue;
     auto LocalVar = GetLocalVar(Ops[DebugLocalVarIdx]);
+    DebugLoc Loc = GetRecordLoc(LocalVar);
+    if (!Loc)
+      return nullptr;
     Value *Val = GetValue(Ops[ValueIdx]);
     DIExpression *Expr = GetExpression(Ops[ExpressionIdx]);
-    DebugLoc Loc = transDebugScope(DebugInst);
     DbgInstPtr DbgValIntr = getDIBuilder(DebugInst).insertDbgValueIntrinsic(
         Val, LocalVar.first, Expr, Loc, BB);
 
